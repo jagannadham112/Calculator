@@ -1,0 +1,67 @@
+// lib/exam-stack.ts
+import * as cdk from 'aws-cdk-lib';
+import { Construct } from 'constructs';
+import * as dynamodb from 'aws-cdk-lib/aws-dynamodb';
+import * as lambda from 'aws-cdk-lib/aws-lambda';
+import * as apigw from 'aws-cdk-lib/aws-apigateway';
+
+export class ExamStack extends cdk.Stack {
+  constructor(scope: Construct, id: string, props?: cdk.StackProps) {
+    super(scope, id, props);
+
+    // DynamoDB Table (as per question)
+    const table = new dynamodb.Table(this, 'CinemasTable', {
+      billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
+      partitionKey: { name: 'cinemaId', type: dynamodb.AttributeType.NUMBER },
+      sortKey: { name: 'movieId', type: dynamodb.AttributeType.STRING },
+      removalPolicy: cdk.RemovalPolicy.DESTROY,
+      tableName: 'CinemaTable',
+    });
+
+    table.addLocalSecondaryIndex({
+      indexName: 'periodIx',
+      sortKey: { name: 'period', type: dynamodb.AttributeType.STRING },
+    });
+
+    // Lambda for existing cinema-movies endpoint
+    const cinemaMoviesFn = new lambda.Function(this, 'CinemaMoviesHandler', {
+      runtime: lambda.Runtime.NODEJS_18_X,
+      handler: 'cinemaMovies.handler',
+      code: lambda.Code.fromAsset('lambdas'),
+      environment: {
+        TABLE_NAME: table.tableName,
+      },
+    });
+    table.grantReadData(cinemaMoviesFn);
+
+    // 👉 New Lambda for trending movies
+    const trendingFn = new lambda.Function(this, 'TrendingMoviesHandler', {
+      runtime: lambda.Runtime.NODEJS_18_X,
+      handler: 'trending.handler',
+      code: lambda.Code.fromAsset('lambdas'),
+      environment: {
+        TABLE_NAME: table.tableName,
+      },
+    });
+
+    // Grant read permissions if using DynamoDB, else adjust for external API
+    table.grantReadData(trendingFn);
+
+    // API Gateway REST API
+    const api = new apigw.RestApi(this, 'CinemasApi', {
+      restApiName: 'Cinemas Service',
+      defaultCorsPreflightOptions: { allowOrigins: apigw.Cors.ALL_ORIGINS }
+    });
+
+    // /cinemas/{cinemaId}/movies
+    const cinemas = api.root.addResource('cinemas');
+    const cinema = cinemas.addResource('{cinemaId}');
+    const movies = cinema.addResource('movies');
+    movies.addMethod('GET', new apigw.LambdaIntegration(cinemaMoviesFn));
+
+    // 👉 New /movies/trending route
+    const moviesRoot = api.root.addResource('movies');
+    const trending = moviesRoot.addResource('trending');
+    trending.addMethod('GET', new apigw.LambdaIntegration(trendingFn));
+  }
+}
